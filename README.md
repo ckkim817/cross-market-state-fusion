@@ -10,13 +10,15 @@ A PPO (Proximal Policy Optimization) agent that paper trades Polymarket's 15-min
 
 ## What This Proves
 
-1. **RL can learn from sparse realized PnL** - The agent only gets reward when positions close at market resolution. No intermediate feedback during the 15-minute window. Despite this sparsity, it learns profitable patterns. 109% ROI on paper trades over ~2 hours.
+1. **RL can learn from sparse PnL signals** - The agent only gets reward when positions close. No intermediate feedback during the 15-minute window. Despite this sparsity, it learns profitable patterns. 109% ROI on paper trades over ~2 hours.
 
-2. **Multi-source data fusion works** - Combining Binance price momentum, futures order flow, and Polymarket orderbook state into a single 18-dim observation gives the agent useful signal.
+2. **Multi-source data fusion works** - Combining Binance futures order flow and Polymarket orderbook state into a single 18-dim observation gives the agent useful signal.
 
 3. **Low win rate can be profitable** - The agent wins only 21% of trades but profits because binary markets have asymmetric payoffs. Buy at 0.40, win pays 0.60; lose costs 0.40.
 
 4. **On-device training is viable** - MLX on Apple Silicon handles real-time PPO updates during live market hours without cloud GPU costs.
+
+**Important caveat**: Training uses probability-based PnL (exit_prob - entry_prob), not actual binary outcomes. This is a proxy signal - the agent learns "did probability move my way?" rather than "did I correctly predict UP vs DOWN?"
 
 ## What This Doesn't Prove
 
@@ -52,7 +54,7 @@ See [TRAINING_JOURNAL.md](TRAINING_JOURNAL.md) for detailed training analysis.
 **Capital**: $10 base, 50% position sizing ($5/trade)
 **Phase 2 ROI**: 109% on base capital
 
-**Key insight**: Phase 1 failed because shaped rewards let the agent "game" bonuses without profitable trading. Phase 2 used pure realized PnL - sparse but honest signal.
+**Key insight**: Phase 1 failed because shaped rewards let the agent "game" bonuses without profitable trading. Phase 2 used probability-based PnL (normalized) - sparse but honest signal.
 
 ---
 

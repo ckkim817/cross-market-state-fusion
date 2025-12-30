@@ -6,7 +6,7 @@ Training a PPO agent to trade 15-minute binary prediction markets. This document
 
 ## The Experiment
 
-**Question**: Can an RL agent learn profitable trading patterns from sparse binary outcomes?
+**Question**: Can an RL agent learn profitable trading patterns from sparse PnL rewards?
 
 **Setup**: Paper trade 4 concurrent crypto markets (BTC, ETH, SOL, XRP) on Polymarket using live data from Binance + Polymarket orderbooks. $10 base capital, 50% position sizing.
 
@@ -28,7 +28,7 @@ The same neural network decides for all assets - learning generalizable crypto p
 ### Unique Market Structure
 
 Polymarket's 15-minute crypto markets are unusual:
-- **Binary outcome**: Pays $1 or $0 based on price direction. No partial outcomes.
+- **Binary resolution**: Market resolves to $1 or $0 based on price direction. But our training uses probability-based PnL, not actual resolution.
 - **Known resolution time**: You know exactly when the market closes. Changes the decision calculus.
 - **Orderbook-based**: Real CLOB with bid/ask spreads, not an AMM.
 - **Cross-exchange lag**: Polymarket prices lag Binance by seconds. Exploitable.
@@ -40,8 +40,7 @@ This creates arbitrage opportunities - observe Binance move, bet on Polymarket b
 The agent fuses three real-time streams:
 
 ```
-Binance Spot WSS     → Price returns (1m, 5m, 10m), volatility
-Binance Futures WSS  → Order flow, CVD, liquidations, large trades
+Binance Futures WSS  → Price returns (1m, 5m, 10m), volatility, order flow, CVD, large trades
 Polymarket CLOB WSS  → Bid/ask spread, orderbook imbalance
 ```
 
@@ -58,14 +57,21 @@ This creates an 18-dimensional state that captures both underlying asset dynamic
 
 ### Sparse Reward Signal
 
-The agent only receives reward when a position closes - either by selling before resolution or holding to market close. No intermediate feedback while holding.
+The agent only receives reward when a position closes. No intermediate feedback while holding.
 
-Example trade:
-- Buy UP token at 0.55, sell later at 0.65 → reward = +$0.10 × size
-- Buy UP token at 0.55, hold to resolution, market goes UP → reward = +$0.45 × size
-- Buy UP token at 0.55, hold to resolution, market goes DOWN → reward = -$0.55 × size
+**Important caveat**: The reward is based on **probability change**, not actual market resolution. When a position closes (either by explicit sell or at market expiry):
 
-This sparsity makes credit assignment harder. The agent takes actions every tick but only learns from realized PnL when positions close.
+```
+reward = (exit_probability - entry_probability) × size
+```
+
+Example trades:
+- Buy UP at 0.55, sell at 0.65 → reward = +$0.10 × size
+- Buy UP at 0.55, hold to expiry where prob = 0.70 → reward = +$0.15 × size
+
+Note: At expiry, we use the final probability, not the binary outcome ($1 or $0). This means training signal differs from true realized PnL. The agent learns "did probability move my way?" rather than "did I predict the actual outcome correctly?"
+
+This sparsity makes credit assignment harder. The agent takes actions every tick but only learns from PnL when positions close.
 
 ---
 
@@ -93,7 +99,7 @@ reward += 0.001 * size_multiplier  # Bonus for larger positions
 | 20 | 0.40 | $1.37 | 19.4% |
 | 36 | 0.36 | $3.90 | 20.2% |
 
-**Why it failed**: The shaping rewards were similar magnitude to actual PnL. With typical PnL deltas of $0.01-0.05, the scaled signal was 0.001-0.005 - same as the bonuses.
+**What we learned**: The shaping rewards were similar magnitude to actual PnL. With typical PnL deltas of $0.01-0.05, the scaled signal was 0.001-0.005 - same as the bonuses.
 
 The agent learned to game the reward function:
 - Trade with momentum → collect +0.002 bonus
@@ -117,17 +123,23 @@ When these diverge, the agent is learning the wrong thing.
 
 **Duration**: ~52 minutes | **Trades**: 3,330
 
-Switched to pure realized PnL on position close:
+Switched to probability-based PnL on position close:
 
 ```python
 def reward(position_close):
-    return (exit_price - entry_price) * size  # That's it
+    return (exit_prob - entry_prob) * size  # Probability delta, not binary outcome
 ```
 
 Also:
 - Doubled entropy coefficient (0.05 → 0.10)
 - Simplified action space (7 → 3 actions)
 - Reset reward normalization stats
+
+**Note on reward normalization**: Raw PnL rewards are z-score normalized before training:
+```python
+norm_reward = (raw_pnl - running_mean) / (running_std + 1e-8)
+```
+This helps with gradient stability but means the network sees normalized values, not raw dollars.
 
 **What happened**: Entropy recovered to 1.05 (near maximum for 3 actions). PnL grew steadily.
 
@@ -156,7 +168,7 @@ You can win 40% of the time and break even. Win 21% of the time but pick your sp
 
 | Aspect | Phase 1 | Phase 2 |
 |--------|---------|---------|
-| Reward | PnL delta + shaping bonuses | Pure realized PnL |
+| Reward | PnL delta + shaping bonuses | Probability-based PnL (normalized) |
 | Entropy coef | 0.05 | 0.10 |
 | Actions | 7 (variable sizing) | 3 (fixed 50%) |
 | Final entropy | 0.36 (collapsed) | 1.05 (healthy) |
@@ -164,7 +176,7 @@ You can win 40% of the time and break even. Win 21% of the time but pick your sp
 
 **Key changes**:
 
-1. **Removed shaping rewards** - No more gameable bonuses. Sparse but honest signal.
+1. **Removed shaping rewards** - No more gameable bonuses. Sparse probability-delta signal only.
 
 2. **Doubled entropy coefficient** - Stronger exploration incentive. Prevented policy collapse.
 
@@ -231,49 +243,15 @@ The critic learned to predict a noisier, more meaningful signal.
 
 ---
 
-## What This Proves
+## Takeaways
 
-1. **RL learns from sparse realized PnL** - The agent only gets reward when positions close (at market resolution). No intermediate feedback. Despite this sparsity, it found profitable patterns.
+1. **Reward shaping is risky** - When shaping rewards are gameable and similar magnitude to the real signal, agents optimize the wrong thing. Sparse but honest > dense but noisy.
 
-2. **Reward shaping can backfire** - When shaping rewards are gameable and similar magnitude to the real signal, agents optimize the wrong thing. Sparse but honest > dense but noisy.
+2. **Probability-based training is a proxy** - We train on probability deltas, not actual binary outcomes. This correlates with but doesn't equal true realized PnL.
 
 3. **Entropy coefficient matters** - 0.05 caused policy collapse; 0.10 maintained healthy exploration. Small hyperparameter, big impact.
 
-4. **Low win rate can be profitable** - 21% wins, 109% ROI. Asymmetric payoffs change the math entirely.
-
-5. **Multi-source fusion provides signal** - Combining Binance price/flow data with Polymarket orderbook state gave the agent something learnable.
-
-## What This Doesn't Prove
-
-1. **Live profitability** - Paper trading assumes instant fills at mid-price. Real trading faces latency (50-200ms), slippage, fees, and market impact. Expect 20-50% degradation.
-
-2. **Statistical significance** - 72 updates over 2 hours isn't enough to confirm edge. Could be variance. Needs weeks of out-of-sample testing.
-
-3. **Scalability** - $5 positions are invisible to the market. At $100+, the agent's orders would move prices and consume liquidity.
-
-4. **Durability** - Markets adapt. If this edge exists, others will find and arbitrage it away.
-
----
-
-## Files
-
-```
-experiments/03_polymarket/
-├── run.py                 # Main trading engine
-├── dashboard.py           # Real-time visualization
-├── strategies/
-│   ├── base.py           # Action/State definitions
-│   └── rl_mlx.py         # PPO implementation
-├── helpers/
-│   ├── polymarket_api.py # Market data
-│   ├── binance_wss.py    # Price streaming
-│   └── orderbook_wss.py  # Orderbook streaming
-├── logs/
-│   ├── trades_*.csv      # Trade history
-│   └── updates_*.csv     # PPO metrics
-├── rl_model.safetensors  # Model weights
-└── rl_model_stats.npz    # Reward normalization
-```
+4. **Watch for buffer/trade win rate divergence** - When these diverge, the agent is optimizing the wrong objective.
 
 ---
 

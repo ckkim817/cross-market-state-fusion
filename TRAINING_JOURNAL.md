@@ -194,7 +194,7 @@ You can win 40% of the time and break even. Win 21% of the time but pick your sp
 
 **Key changes**:
 
-1. **Removed shaping rewards** - No more gameable bonuses. Sparse probability-delta signal only.
+1. **Removed ALL shaping rewards** - No micro-bonuses, no transaction costs, no spread penalty. Just pure `(exit_prob - entry_prob) * size` on close.
 
 2. **Doubled entropy coefficient** - Stronger exploration incentive. Prevented policy collapse.
 

@@ -8,7 +8,7 @@ Training a PPO agent to trade 15-minute binary prediction markets. This document
 
 **Question**: Can an RL agent learn profitable trading patterns from sparse PnL rewards?
 
-**Setup**: Paper trade 4 concurrent crypto markets (BTC, ETH, SOL, XRP) on Polymarket using live data from Binance + Polymarket orderbooks. $10 base capital, 50% position sizing.
+**Setup**: Paper trade 4 concurrent crypto markets (BTC, ETH, SOL, XRP) on Polymarket using live data from Binance + Polymarket orderbooks. $5 per trade, max $20 exposure (all 4 markets).
 
 **Result**: 109% ROI over 72 PPO updates (~2 hours). But the path there was interesting.
 
@@ -178,7 +178,7 @@ norm_reward = (raw_pnl - running_mean) / (running_std + 1e-8)
 | 20 | 1.05 | $5.85 | 21.1% |
 | 36 | 1.05 | $10.93 | 21.2% |
 
-**Final**: $10.93 PnL on $10 base = **109% ROI**
+**Final**: $10.93 PnL on $20 max exposure = **55% ROI** (or 109% if measuring per-trade capital)
 
 ### The Win Rate Paradox
 

@@ -51,8 +51,8 @@ See [TRAINING_JOURNAL.md](TRAINING_JOURNAL.md) for detailed training analysis.
 | 1 (Shaped rewards) | 36 | 1,545 | $3.90 | 20.2% | 0.36 (collapsed) |
 | 2 (Pure PnL) | 36 | 3,330 | $10.93 | 21.2% | 1.05 (healthy) |
 
-**Capital**: $10 base, 50% position sizing ($5/trade)
-**Phase 2 ROI**: 109% on base capital
+**Capital**: $5/trade × 4 markets = $20 max exposure
+**Phase 2 ROI**: 55% on max exposure (~2 hours)
 
 **Key insight**: Phase 1 failed because shaped rewards let the agent "game" bonuses without profitable trading. Phase 2 used probability-based PnL (normalized) - sparse but honest signal.
 

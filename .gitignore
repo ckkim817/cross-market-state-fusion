@@ -23,8 +23,6 @@ wheels/
 env/
 venv/
 ENV/
-*.safetensors
-*_stats.npz
 .DS_Store
 
 # Keep trade logs locally but don't push (large files)

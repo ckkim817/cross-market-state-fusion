@@ -3,10 +3,13 @@ Training logger for RL experiments.
 Logs trades, PPO updates, and episode summaries to CSV files.
 """
 import csv
+import logging
 import os
 from datetime import datetime
 from typing import Dict, List, Optional
 from dataclasses import dataclass, asdict
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -89,37 +92,46 @@ class TrainingLogger:
         # Write headers
         self._write_headers()
 
-        print(f"  [LOG] Session: {self.session_id}")
-        print(f"  [LOG] Trades:  {self.trades_file}")
-        print(f"  [LOG] Updates: {self.updates_file}")
+        logger.info(f"Session: {self.session_id}")
+        logger.info(f"Trades: {self.trades_file}")
+        logger.info(f"Updates: {self.updates_file}")
 
     def _write_headers(self):
         """Write CSV headers."""
         # Trades
-        with open(self.trades_file, 'w', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=[
-                'timestamp', 'asset', 'action', 'side', 'entry_price', 'exit_price',
-                'size', 'pnl', 'duration_sec', 'time_remaining', 'prob_at_entry',
-                'prob_at_exit', 'binance_change'
-            ])
-            writer.writeheader()
+        try:
+            with open(self.trades_file, 'w', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=[
+                    'timestamp', 'asset', 'action', 'side', 'entry_price', 'exit_price',
+                    'size', 'pnl', 'duration_sec', 'time_remaining', 'prob_at_entry',
+                    'prob_at_exit', 'binance_change'
+                ])
+                writer.writeheader()
+        except IOError as e:
+            logger.error(f"Error writing headers to {self.trades_file}: {e}")
 
         # Updates
-        with open(self.updates_file, 'w', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=[
-                'timestamp', 'update_num', 'policy_loss', 'value_loss', 'entropy',
-                'approx_kl', 'clip_fraction', 'explained_variance', 'buffer_avg_reward',
-                'buffer_win_rate', 'cumulative_pnl', 'cumulative_trades', 'cumulative_win_rate'
-            ])
-            writer.writeheader()
+        try:
+            with open(self.updates_file, 'w', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=[
+                    'timestamp', 'update_num', 'policy_loss', 'value_loss', 'entropy',
+                    'approx_kl', 'clip_fraction', 'explained_variance', 'buffer_avg_reward',
+                    'buffer_win_rate', 'cumulative_pnl', 'cumulative_trades', 'cumulative_win_rate'
+                ])
+                writer.writeheader()
+        except IOError as e:
+            logger.error(f"Error writing headers to {self.updates_file}: {e}")
 
         # Episodes
-        with open(self.episodes_file, 'w', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=[
-                'timestamp', 'asset', 'condition_id', 'outcome', 'trades_taken',
-                'episode_pnl', 'final_prob', 'binance_change', 'total_exposure_time'
-            ])
-            writer.writeheader()
+        try:
+            with open(self.episodes_file, 'w', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=[
+                    'timestamp', 'asset', 'condition_id', 'outcome', 'trades_taken',
+                    'episode_pnl', 'final_prob', 'binance_change', 'total_exposure_time'
+                ])
+                writer.writeheader()
+        except IOError as e:
+            logger.error(f"Error writing headers to {self.episodes_file}: {e}")
 
     def log_trade(
         self,
@@ -163,9 +175,12 @@ class TrainingLogger:
             self.episode_trades[condition_id].append(record)
 
         # Append to CSV
-        with open(self.trades_file, 'a', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=list(asdict(record).keys()))
-            writer.writerow(asdict(record))
+        try:
+            with open(self.trades_file, 'a', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=list(asdict(record).keys()))
+                writer.writerow(asdict(record))
+        except IOError as e:
+            logger.error(f"Error writing to {self.trades_file}: {e}")
 
     def log_update(
         self,
@@ -202,9 +217,12 @@ class TrainingLogger:
         self.updates.append(record)
 
         # Append to CSV
-        with open(self.updates_file, 'a', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=list(asdict(record).keys()))
-            writer.writerow(asdict(record))
+        try:
+            with open(self.updates_file, 'a', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=list(asdict(record).keys()))
+                writer.writerow(asdict(record))
+        except IOError as e:
+            logger.error(f"Error writing to {self.updates_file}: {e}")
 
     def log_episode(
         self,
@@ -238,9 +256,12 @@ class TrainingLogger:
             del self.episode_trades[condition_id]
 
         # Append to CSV
-        with open(self.episodes_file, 'a', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=list(asdict(record).keys()))
-            writer.writerow(asdict(record))
+        try:
+            with open(self.episodes_file, 'a', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=list(asdict(record).keys()))
+                writer.writerow(asdict(record))
+        except IOError as e:
+            logger.error(f"Error writing to {self.episodes_file}: {e}")
 
     def get_summary(self) -> Dict:
         """Get current session summary."""

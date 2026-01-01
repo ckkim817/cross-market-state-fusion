@@ -3,10 +3,15 @@ Binance WebSocket helpers for real-time crypto price data.
 """
 import asyncio
 import json
+import logging
+import requests
 import websockets
+from collections import deque
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
-from typing import Dict, List, Callable, Optional
+from typing import Dict, Deque, List, Callable, Optional
+
+logger = logging.getLogger(__name__)
 
 BINANCE_WSS = "wss://stream.binance.com:9443"
 
@@ -25,15 +30,12 @@ class PriceState:
     asset: str
     price: float = 0.0
     last_update: Optional[datetime] = None
-    history: List[float] = field(default_factory=list)
-    max_history: int = 1000
+    history: Deque[float] = field(default_factory=lambda: deque(maxlen=1000))
 
     def update(self, price: float):
         self.price = price
         self.last_update = datetime.now(timezone.utc)
-        self.history.append(price)
-        if len(self.history) > self.max_history:
-            self.history = self.history[-self.max_history:]
+        self.history.append(price)  # deque auto-discards oldest when full
 
 
 class BinanceStreamer:
@@ -66,7 +68,10 @@ class BinanceStreamer:
     def get_history(self, asset: str, n: int = 100) -> List[float]:
         """Get price history for an asset."""
         state = self.states.get(asset)
-        return state.history[-n:] if state else []
+        if not state:
+            return []
+        # Convert deque slice to list for compatibility
+        return list(state.history)[-n:]
 
     async def stream(self):
         """Start streaming prices."""
@@ -77,12 +82,12 @@ class BinanceStreamer:
         streams = "/".join([f"{s}@trade" for s in symbols])
         url = f"{BINANCE_WSS}/stream?streams={streams}"
 
-        print(f"Connecting to Binance WSS for {', '.join(self.assets)}...")
+        logger.info(f"Connecting to Binance WSS for {', '.join(self.assets)}...")
 
         while self.running:
             try:
                 async with websockets.connect(url) as ws:
-                    print("✓ Connected to Binance")
+                    logger.info("Connected to Binance")
 
                     while self.running:
                         try:
@@ -105,8 +110,8 @@ class BinanceStreamer:
                                             for cb in self.callbacks:
                                                 try:
                                                     cb(asset, price)
-                                                except:
-                                                    pass
+                                                except Exception as e:
+                                                    logger.error(f"Callback error: {e}")
                                         break
 
                         except asyncio.TimeoutError:
@@ -115,7 +120,7 @@ class BinanceStreamer:
                             pass
 
             except Exception as e:
-                print(f"WSS error: {e}, reconnecting...")
+                logger.warning(f"WSS error: {e}, reconnecting...")
                 await asyncio.sleep(1)
 
     def stop(self):
@@ -144,14 +149,13 @@ async def get_current_prices(assets: List[str] = None) -> Dict[str, float]:
             continue
 
         try:
-            import requests
             url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol.upper()}"
             resp = requests.get(url, timeout=5)
             if resp.status_code == 200:
                 data = resp.json()
                 prices[asset] = float(data["price"])
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Error fetching price for {asset}: {e}")
 
     return prices
 

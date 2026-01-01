@@ -14,14 +14,21 @@ Usage:
 import asyncio
 import argparse
 import copy
+import logging
 import sys
 import threading
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
+# Configure logging - WARNING level for clean output
+logging.basicConfig(
+    level=logging.WARNING,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+
 sys.path.insert(0, ".")
-from helpers import get_15m_markets, BinanceStreamer, OrderbookStreamer, Market, FuturesStreamer, get_logger
+from helpers import get_15m_markets_async, BinanceStreamer, OrderbookStreamer, Market, FuturesStreamer, get_logger
 from strategies import (
     Strategy, MarketState, Action,
     create_strategy, AVAILABLE_STRATEGIES,
@@ -85,13 +92,13 @@ class TradingEngine:
         # Logger (for RL training)
         self.logger = get_logger() if isinstance(strategy, RLStrategy) else None
 
-    def refresh_markets(self):
+    async def refresh_markets(self):
         """Find active 15-min markets."""
         print("\n" + "=" * 60)
         print(f"STRATEGY: {self.strategy.name.upper()}")
         print("=" * 60)
 
-        markets = get_15m_markets(assets=["BTC", "ETH", "SOL", "XRP"])
+        markets = await get_15m_markets_async(assets=["BTC", "ETH", "SOL", "XRP"])
         now = datetime.now(timezone.utc)
 
         # Clear stale data
@@ -282,7 +289,7 @@ class TradingEngine:
             if not self.markets:
                 print("\nAll markets expired. Refreshing...")
                 self.close_all_positions()
-                self.refresh_markets()
+                await self.refresh_markets()
                 if not self.markets:
                     print("No new markets. Waiting...")
                     await asyncio.sleep(30)
@@ -530,7 +537,7 @@ class TradingEngine:
     async def run(self):
         """Run the trading engine."""
         self.running = True
-        self.refresh_markets()
+        await self.refresh_markets()
 
         if not self.markets:
             print("No markets to trade!")

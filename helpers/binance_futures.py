@@ -6,12 +6,17 @@ Provides: funding rate, open interest, liquidations, mark price.
 """
 import asyncio
 import json
+import logging
+import time
 import requests
 import websockets
+import numpy as np
 from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 from collections import deque
+
+logger = logging.getLogger(__name__)
 
 BINANCE_FUTURES_API = "https://fapi.binance.com"
 BINANCE_FUTURES_WSS = "wss://fstream.binance.com"
@@ -38,7 +43,7 @@ class FuturesState:
     # Open Interest
     open_interest: float = 0.0  # Current OI in contracts
     open_interest_value: float = 0.0  # OI in USDT
-    oi_history: List[float] = field(default_factory=list)  # For OI change calc
+    oi_history: deque = field(default_factory=lambda: deque(maxlen=60))  # ~1hr history
 
     # Trade flow (CVD proxy)
     buy_volume: float = 0.0
@@ -47,10 +52,10 @@ class FuturesState:
     trade_count: int = 0
 
     # Trade intensity tracking (for 15-min features)
-    trade_timestamps: List[float] = field(default_factory=list)  # Recent trade times
+    trade_timestamps: deque = field(default_factory=lambda: deque(maxlen=100))  # Recent trades
     large_trade_threshold: float = 0.0  # Dynamic threshold based on recent trades
     large_trade_flag: float = 0.0  # 1.0 if large trade just hit, decays
-    recent_trade_sizes: List[float] = field(default_factory=list)  # For threshold calc
+    recent_trade_sizes: deque = field(default_factory=lambda: deque(maxlen=100))  # For threshold
 
     # Liquidations
     recent_long_liqs: float = 0.0  # Long liquidation volume (last hour)
@@ -112,7 +117,6 @@ class FuturesState:
     @property
     def trade_intensity(self) -> float:
         """Trades per second over last 10 seconds."""
-        import time
         now = time.time()
         # Count trades in last 10 seconds
         recent = [t for t in self.trade_timestamps if now - t < 10]
@@ -136,7 +140,7 @@ def fetch_funding_rate(asset: str) -> Optional[Dict]:
                 "index_price": float(data["indexPrice"]),
             }
     except Exception as e:
-        print(f"Error fetching funding rate for {asset}: {e}")
+        logger.error(f"Error fetching funding rate for {asset}: {e}")
     return None
 
 
@@ -155,7 +159,7 @@ def fetch_open_interest(asset: str) -> Optional[Dict]:
                 "open_interest": float(data["openInterest"]),
             }
     except Exception as e:
-        print(f"Error fetching OI for {asset}: {e}")
+        logger.error(f"Error fetching OI for {asset}: {e}")
     return None
 
 
@@ -171,7 +175,7 @@ def fetch_klines(asset: str, interval: str = "1m", limit: int = 60) -> Optional[
         if resp.status_code == 200:
             return resp.json()
     except Exception as e:
-        print(f"Error fetching klines for {asset}: {e}")
+        logger.error(f"Error fetching klines for {asset}: {e}")
     return None
 
 
@@ -209,7 +213,6 @@ def compute_multi_tf_returns(klines_1m: List) -> Dict[str, float]:
         returns = [(closes[i] - closes[i-1]) / closes[i-1] if closes[i-1] > 0 else 0.0
                    for i in range(1, len(closes))]
         if returns:
-            import numpy as np
             realized_vol_1h = float(np.std(returns) * np.sqrt(60))  # Annualize to hourly
 
     return {"1m": ret_1m, "5m": ret_5m, "10m": ret_10m, "15m": ret_15m, "1h": ret_1h, "realized_vol_1h": realized_vol_1h}
@@ -258,23 +261,21 @@ class FuturesStreamer:
                 if not state:
                     continue
 
-                # Funding rate
-                funding = fetch_funding_rate(asset)
+                # Funding rate (non-blocking via thread pool)
+                funding = await asyncio.to_thread(fetch_funding_rate, asset)
                 if funding:
                     state.funding_rate = funding["funding_rate"]
                     state.mark_price = funding["mark_price"]
                     state.index_price = funding["index_price"]
 
-                # Open interest
-                oi = fetch_open_interest(asset)
+                # Open interest (non-blocking via thread pool)
+                oi = await asyncio.to_thread(fetch_open_interest, asset)
                 if oi:
                     state.open_interest = oi["open_interest"]
-                    state.oi_history.append(oi["open_interest"])
-                    if len(state.oi_history) > 60:  # Keep ~1hr of history
-                        state.oi_history = state.oi_history[-60:]
+                    state.oi_history.append(oi["open_interest"])  # deque auto-trims
 
-                # Klines for multi-TF returns and volume (fetch 65 for 1h returns)
-                klines = fetch_klines(asset, "1m", 65)
+                # Klines for multi-TF returns and volume (non-blocking via thread pool)
+                klines = await asyncio.to_thread(fetch_klines, asset, "1m", 65)
                 if klines:
                     returns = compute_multi_tf_returns(klines)
                     state.returns_1m = returns["1m"]
@@ -308,7 +309,6 @@ class FuturesStreamer:
                             data = json.loads(msg)
 
                             if "data" in data:
-                                import time
                                 trade = data["data"]
                                 symbol = trade["s"]
                                 price = float(trade["p"])
@@ -330,18 +330,13 @@ class FuturesStreamer:
 
                                             # Track trade timestamps for intensity
                                             now = time.time()
-                                            state.trade_timestamps.append(now)
-                                            # Keep only last 30 seconds of timestamps
-                                            state.trade_timestamps = [t for t in state.trade_timestamps if now - t < 30]
+                                            state.trade_timestamps.append(now)  # deque auto-trims
 
                                             # Track trade sizes for large trade detection
-                                            state.recent_trade_sizes.append(trade_value)
-                                            if len(state.recent_trade_sizes) > 100:
-                                                state.recent_trade_sizes = state.recent_trade_sizes[-100:]
+                                            state.recent_trade_sizes.append(trade_value)  # deque auto-trims
 
                                             # Update large trade threshold (2x median of recent trades)
                                             if len(state.recent_trade_sizes) >= 20:
-                                                import numpy as np
                                                 median_size = np.median(state.recent_trade_sizes)
                                                 state.large_trade_threshold = median_size * 3  # 3x median = large
 
@@ -354,7 +349,7 @@ class FuturesStreamer:
                             pass
 
             except Exception as e:
-                print(f"Futures trade stream error: {e}")
+                logger.warning(f"Futures trade stream error: {e}")
                 await asyncio.sleep(1)
 
     async def _stream_liquidations(self):
@@ -431,7 +426,7 @@ class FuturesStreamer:
         """Start all futures data streams."""
         self.running = True
 
-        print("Starting Binance Futures streams...")
+        logger.info("Starting Binance Futures streams...")
 
         # Initial data fetch
         for asset in self.assets:
@@ -441,7 +436,7 @@ class FuturesStreamer:
                 if funding:
                     state.funding_rate = funding["funding_rate"]
                     state.mark_price = funding["mark_price"]
-                    print(f"  {asset}: funding={state.funding_rate:.4%}, mark=${state.mark_price:,.2f}")
+                    logger.info(f"{asset}: funding={state.funding_rate:.4%}, mark=${state.mark_price:,.2f}")
 
         # Run all streams concurrently
         await asyncio.gather(

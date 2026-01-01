@@ -3,6 +3,7 @@ Polymarket 15-min trading helpers.
 """
 from .polymarket_api import (
     get_15m_markets,
+    get_15m_markets_async,
     get_next_market,
     Market,
 )
@@ -29,6 +30,7 @@ get_active_markets = get_15m_markets
 
 __all__ = [
     "get_15m_markets",
+    "get_15m_markets_async",
     "get_active_markets",
     "get_next_market",
     "Market",

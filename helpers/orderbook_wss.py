@@ -3,10 +3,13 @@ Polymarket CLOB WebSocket helpers for orderbook streaming.
 """
 import asyncio
 import json
+import logging
 import websockets
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Dict, List, Callable, Optional
+
+logger = logging.getLogger(__name__)
 
 CLOB_WSS = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 
@@ -51,8 +54,8 @@ class OrderbookStreamer:
         self.callbacks: List[Callable] = []
         self._subscriptions: List[tuple] = []  # [(condition_id, token_id, side), ...]
         self._pending_subs: List[str] = []  # New token IDs to subscribe
+        self._pending_unsubs: List[str] = []  # Token IDs to unsubscribe
         self._ws: Optional[websockets.WebSocketClientProtocol] = None
-        self._force_reconnect = False  # Flag to trigger reconnection
 
     def subscribe(self, condition_id: str, token_up: str, token_down: str):
         """Subscribe to orderbook for a market."""
@@ -71,7 +74,7 @@ class OrderbookStreamer:
             added.append("DOWN")
 
         if added:
-            print(f"  [OB] Queued {condition_id[:8]}... ({', '.join(added)}) - pending: {len(self._pending_subs)}")
+            logger.debug(f"Queued {condition_id[:8]}... ({', '.join(added)}) - pending: {len(self._pending_subs)}")
 
         # Initialize orderbook states
         self.orderbooks[f"{condition_id}_UP"] = OrderbookState(
@@ -85,25 +88,70 @@ class OrderbookStreamer:
             side="DOWN"
         )
 
-    def clear_stale(self, active_condition_ids: set):
-        """Remove orderbooks for expired markets and trigger reconnection."""
+    async def unsubscribe(self, token_ids: List[str]):
+        """Unsubscribe from specific tokens (keeps connection alive)."""
+        if not self._ws or not token_ids:
+            return
+
+        try:
+            msg = {
+                "assets_ids": token_ids,
+                "operation": "unsubscribe"  # Per API docs
+            }
+            await self._ws.send(json.dumps(msg))
+            logger.info(f"Unsubscribed from {len(token_ids)} tokens")
+        except Exception as e:
+            logger.error(f"Unsubscribe error: {e}")
+
+    async def clear_stale_async(self, active_condition_ids: set):
+        """Remove orderbooks for expired markets and unsubscribe (async)."""
         stale_keys = [k for k in self.orderbooks.keys()
                       if k.rsplit('_', 1)[0] not in active_condition_ids]
 
-        had_stale = len(stale_keys) > 0
+        if not stale_keys:
+            return
+
+        # Collect stale token IDs before deleting
+        stale_tokens = []
         for k in stale_keys:
+            ob = self.orderbooks.get(k)
+            if ob:
+                stale_tokens.append(ob.token_id)
             del self.orderbooks[k]
 
-        # Also clean up subscriptions list
-        old_sub_count = len(self._subscriptions)
+        # Clean up subscriptions list
         self._subscriptions = [(cid, tid, side) for cid, tid, side in self._subscriptions
                                if cid in active_condition_ids]
 
-        # If we removed subscriptions, force reconnect to cleanly re-subscribe
-        # This fixes the issue where WSS gets stuck on stale token IDs
-        if had_stale or len(self._subscriptions) < old_sub_count:
-            print(f"  [OB] Cleared {len(stale_keys)} stale orderbooks, triggering reconnect")
-            self._force_reconnect = True
+        # Unsubscribe from stale tokens (no reconnect needed!)
+        if stale_tokens:
+            await self.unsubscribe(stale_tokens)
+            logger.info(f"Cleared {len(stale_keys)} stale orderbooks")
+
+    def clear_stale(self, active_condition_ids: set):
+        """Sync wrapper for clear_stale_async (schedules unsubscribe)."""
+        stale_keys = [k for k in self.orderbooks.keys()
+                      if k.rsplit('_', 1)[0] not in active_condition_ids]
+
+        if not stale_keys:
+            return
+
+        # Collect stale token IDs
+        stale_tokens = []
+        for k in stale_keys:
+            ob = self.orderbooks.get(k)
+            if ob:
+                stale_tokens.append(ob.token_id)
+            del self.orderbooks[k]
+
+        # Clean up subscriptions list
+        self._subscriptions = [(cid, tid, side) for cid, tid, side in self._subscriptions
+                               if cid in active_condition_ids]
+
+        # Queue unsubscribe (will be processed in stream loop)
+        if stale_tokens:
+            self._pending_unsubs.extend(stale_tokens)
+            logger.info(f"Queued unsubscribe for {len(stale_tokens)} tokens")
 
     def on_update(self, callback: Callable):
         """Register a callback for orderbook updates."""
@@ -125,7 +173,7 @@ class OrderbookStreamer:
 
             try:
                 async with websockets.connect(CLOB_WSS) as ws:
-                    print("✓ Connected to Polymarket CLOB WSS")
+                    logger.info("Connected to Polymarket CLOB WSS")
 
                     # Collect all token IDs for initial subscription
                     token_ids = [token_id for _, token_id, _ in self._subscriptions]
@@ -142,29 +190,34 @@ class OrderbookStreamer:
                             "type": "market"
                         }
                         await ws.send(json.dumps(sub_msg))
-                        print(f"  Subscribed to {len(token_ids)} orderbooks")
+                        logger.info(f"Subscribed to {len(token_ids)} orderbooks")
 
                     self._ws = ws
 
                     # Listen for updates
                     while self.running:
                         try:
-                            # Check for forced reconnection (markets changed)
-                            if self._force_reconnect:
-                                print("  [OB] Force reconnect triggered, closing connection...")
-                                self._force_reconnect = False
-                                break  # Exit inner loop to reconnect
+                            # Process pending unsubscribes (stale markets)
+                            if self._pending_unsubs:
+                                unsub_tokens = self._pending_unsubs.copy()
+                                self._pending_unsubs.clear()
+                                unsub_msg = {
+                                    "assets_ids": unsub_tokens,
+                                    "operation": "unsubscribe"
+                                }
+                                await ws.send(json.dumps(unsub_msg))
+                                logger.debug(f"Sent unsubscribe for {len(unsub_tokens)} tokens")
 
-                            # Check for pending subscriptions FIRST (new markets added dynamically)
+                            # Process pending subscriptions (new markets)
                             if self._pending_subs:
                                 new_tokens = self._pending_subs.copy()
                                 self._pending_subs.clear()
                                 sub_msg = {
                                     "assets_ids": new_tokens,
-                                    "type": "market"
+                                    "operation": "subscribe"
                                 }
                                 await ws.send(json.dumps(sub_msg))
-                                print(f"  [OB] Sent subscription for {len(new_tokens)} new tokens")
+                                logger.debug(f"Sent subscription for {len(new_tokens)} new tokens")
 
                             # Short timeout to check pending subs frequently
                             msg = await asyncio.wait_for(ws.recv(), timeout=0.1)
@@ -192,7 +245,7 @@ class OrderbookStreamer:
                     self._ws = None
 
             except Exception as e:
-                print(f"CLOB WSS error: {e}, reconnecting...")
+                logger.warning(f"CLOB WSS error: {e}, reconnecting...")
                 await asyncio.sleep(1)
 
     def _handle_book_update(self, data: dict):
@@ -217,8 +270,8 @@ class OrderbookStreamer:
                 for cb in self.callbacks:
                     try:
                         cb(ob)
-                    except:
-                        pass
+                    except Exception as e:
+                        logger.error(f"Callback error: {e}")
                 break
 
     def _handle_price_change(self, data: dict):
@@ -234,10 +287,11 @@ class OrderbookStreamer:
                     ob.last_update = datetime.now(timezone.utc)
                     break
 
-    def reconnect(self):
-        """Force a reconnection to pick up new subscriptions cleanly."""
-        print("  [OB] Manual reconnect requested")
-        self._force_reconnect = True
+    async def reconnect(self):
+        """Force a reconnection (closes current connection)."""
+        logger.debug("Manual reconnect requested")
+        if self._ws:
+            await self._ws.close()
 
     def stop(self):
         """Stop streaming."""
